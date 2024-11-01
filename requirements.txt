@@ -1,0 +1,9 @@
+Flask
+flask-cors
+python-dotenv
+cx_Oracle
+PyMuPDF
+langchain-openai
+langchain-core
+langchain-chroma
+PyJWT
