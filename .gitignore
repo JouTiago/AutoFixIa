@@ -1,5 +1,6 @@
 # Ambiente Virtual
 venv/
+.env
 
 # Arquivos de configuração do IDE
 .idea/
@@ -8,8 +9,3 @@ venv/
 # Arquivos Python Compilados
 __pycache__/
 *.pyc
-
-# Arquivo .env
-.env
-
-# Outros arquivos e diretórios que você queira ignorar

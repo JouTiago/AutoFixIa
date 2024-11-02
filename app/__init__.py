@@ -1,23 +1,28 @@
 from flask import Flask
 from flask_cors import CORS
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
+from .config import Config
+import logging
+from .routes import main as main_blueprint
+from .utils import oracle_pool
 
 
 def create_app():
     app = Flask(__name__)
+    app.config.from_object(Config)
     CORS(app)
 
-    # Configurações
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
-    app.config['AZURE_OPENAI_ENDPOINT'] = os.getenv('AZURE_OPENAI_ENDPOINT')
-    app.config['AZURE_OPENAI_API_KEY'] = os.getenv('AZURE_OPENAI_API_KEY')
-    # Adicione outras configurações conforme necessário
+    # Configuração de Logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+    logger = logging.getLogger(__name__)
 
     # Registrar Blueprints ou Routes
-    from .routes import main
-    app.register_blueprint(main)
+    app.register_blueprint(main_blueprint)
+
+    # Encerrar o pool de sessões quando a aplicação for encerrada
+    @app.teardown_appcontext
+    def shutdown_session():
+        if oracle_pool:
+            oracle_pool.close()
+            logger.info("Pool de sessões Oracle fechado.")
 
     return app
