@@ -9,3 +9,6 @@ venv/
 # Arquivos Python Compilados
 __pycache__/
 *.pyc
+
+chroma_langchain_db/
+
