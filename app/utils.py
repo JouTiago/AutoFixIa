@@ -1,6 +1,6 @@
 import jwt
 from functools import wraps
-from flask import request, jsonify
+from flask import request, jsonify, g
 import cx_Oracle
 import logging
 from .config import Config
@@ -33,16 +33,19 @@ oracle_pool = init_oracle_pool()
 
 # Conexão com o Banco de Dados Oracle usando o Pool
 def get_db_connection():
-    if oracle_pool:
-        try:
-            connection = oracle_pool.acquire()
-            return connection
-        except cx_Oracle.Error as e:
-            logger.error(f"Erro ao adquirir conexão do pool: {e}")
-            return None
-    else:
-        logger.error("Pool de sessões Oracle não está disponível.")
-        return None
+    global oracle_pool
+    if 'db_connection' not in g:
+        if oracle_pool:
+            try:
+                g.db_connection = oracle_pool.acquire()
+                logger.info("Conexão Oracle adquirida do pool.")
+            except cx_Oracle.Error as e:
+                logger.error(f"Erro ao adquirir conexão do pool: {e}")
+                g.db_connection = None
+        else:
+            logger.error("Pool de sessões Oracle não está disponível.")
+            g.db_connection = None
+    return g.db_connection
 
 
 # Decorador para verificar o Service-Token
@@ -63,21 +66,15 @@ def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         data = request.get_json()
-        token = data.get('token')
+        token = data.get('Service-Token')
         if not token:
             logger.warning("Token de autenticação ausente.")
             return jsonify({'error': 'Token de autenticação é necessário.'}), 401
-        try:
-            payload = jwt.decode(token, Config.SECRET_KEY, algorithms=["HS256"])
-            user_id = payload['user_id']
-            return f(user_id, *args, **kwargs)
-        except jwt.ExpiredSignatureError:
-            logger.warning("Token de autenticação expirado.")
-            return jsonify({'error': 'Token expirado.'}), 401
-        except jwt.InvalidTokenError:
+        if token != Config.SECRET_KEY:
             logger.warning("Token de autenticação inválido.")
             return jsonify({'error': 'Token inválido.'}), 401
-
+        user_id = "usuario_padrao"
+        return f(user_id, *args, **kwargs)
     return decorated
 
 

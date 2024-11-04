@@ -1,4 +1,5 @@
 import logging
+import threading
 import uuid
 from typing import List, Tuple
 
@@ -43,9 +44,32 @@ ai_model = AzureChatOpenAI(
     max_retries=5
 )
 
-# Variáveis Globais para Chunks e Embeddings
 chunks = []
 chunk_embeddings = []
+chat_sessions = {}
+lock = threading.Lock()
+
+PROCESSED_MANUALS_FILE = "processed_manuals.json"
+
+
+def load_processed_manuals():
+    if os.path.exists(PROCESSED_MANUALS_FILE):
+        with open(PROCESSED_MANUALS_FILE, "r") as file:
+            data = json.load(file)
+            return data.get("processed_manuals", [])
+    else:
+        with open(PROCESSED_MANUALS_FILE, "w") as file:
+            json.dump({"processed_manuals": []}, file)
+        return []
+
+
+def save_processed_manual(id_manual):
+    processed_manuals = load_processed_manuals()
+
+    if id_manual not in processed_manuals:
+        processed_manuals.append(id_manual)
+        with open(PROCESSED_MANUALS_FILE, "w") as file:
+            json.dump({"processed_manuals": processed_manuals}, file)
 
 
 def compute_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -140,7 +164,16 @@ def process_query(query: str) -> str:
         response = ai_model([
             SystemMessage(content="""Você é um assistente especializado que responde com base no manual do carro 
             fornecido. Responda de forma detalhada e específica, evitando recomendações gerais como levar a um mecânico.
-            Use majoritariamente as informações contidas no manual para ajudar a resolver o problema do usuário."""),
+            Use majoritariamente as informações contidas no manual para ajudar a resolver o problema do usuário.
+            VOCÊ DEVE FAZER:
+                NO MÁXIMO 2 PERGUNTAS PARA DESCOBRIR QUAL O PROBLEMA DO CARRO
+                DAR UM DIAGNÓSTICO APOS AS 5 PERGUNTAS
+                JUSTIFICAR A RESPOSTA CITANDO A FONTE NO MANUAL
+                EVITAR REPETIR ALGO QUE JÁ FOI PERGUNTADO
+            VOCÊ NÃO DEVE FAZER:
+                DAR RECOMENDAÇÕES GERAIS, COMO "LEVAR A UM MECÂNICO"
+                NÃO DAR UM DIAGNÓSTICO APÓS REALIZAR AS 5 PERGUNTAS            
+            """),
             HumanMessage(content=f"Contexto:\n{relevant_text}\n\nPergunta: {query}\n\nResposta:")
         ])
 
@@ -233,18 +266,67 @@ def indextexts(texts: List[str], text_summaries: List[str], retriever_instance: 
     retriever_instance.docstore.mset(list(zip(doc_ids, texts)))
 
 
+import json
+import os
+
+# Nome do arquivo JSON para controle de manuais processados
+PROCESSED_MANUALS_FILE = "processed_manuals.json"
+
+
+# Função para carregar a lista de manuais processados
+def load_processed_manuals():
+    if os.path.exists(PROCESSED_MANUALS_FILE):
+        with open(PROCESSED_MANUALS_FILE, "r") as file:
+            data = json.load(file)
+            return data.get("processed_manuals", [])
+    else:
+        # Cria o arquivo se não existir
+        with open(PROCESSED_MANUALS_FILE, "w") as file:
+            json.dump({"processed_manuals": []}, file)
+        return []
+
+
+# Função para salvar um novo manual processado
+def save_processed_manual(id_manual):
+    processed_manuals = load_processed_manuals()
+    if id_manual not in processed_manuals:
+        processed_manuals.append(id_manual)
+        with open(PROCESSED_MANUALS_FILE, "w") as file:
+            json.dump({"processed_manuals": processed_manuals}, file)
+
+
 def initialize_rag_with_manual(id_manual: int):
+    processed_manuals = load_processed_manuals()
+    if id_manual in processed_manuals:
+        logger.info("Manual já processado anteriormente. Usando dados indexados.")
+        return
+
     pdf_blob = get_pdf_blob_content(id_manual)
     if pdf_blob:
         logger.info("Iniciando o RAG com o manual do carro.")
+
+        # Extrair elementos do PDF
         table_elements, text_elements = extract_elements_pymupdf(pdf_blob)
         table_summaries, text_summaries = element_summarizer(table_elements, text_elements, ai_model)
         texts = [e["text"] for e in text_elements]
-        indextexts(texts, text_summaries, retriever_instance=retriever, identifier_key="doc_id")
+
+        # Adicionar `id_manual` como metadado e indexar os documentos
+        doc_ids = [str(uuid.uuid4()) for _ in texts]
+        summary_texts = [
+            Document(page_content=s, metadata={"doc_id": str(id_manual)})
+            for i, s in enumerate(text_summaries)
+        ]
+        retriever.vectorstore.add_documents(summary_texts)
+
+        # Armazenar chunks e embeddings globalmente
         global chunks, chunk_embeddings
         chunks = split_text_into_chunks(" ".join(texts), Config.CHUNK_SIZE)
         embeddings_model = AzureOpenAIEmbeddings()
         chunk_embeddings = embeddings_model.embed_documents(chunks)
+
+        # Salvar o `id_manual` como processado no arquivo JSON
+        save_processed_manual(id_manual)
+
         logger.info("Inicialização do RAG concluída para o manual especificado.")
     else:
         logger.error("Não foi possível encontrar o manual especificado para inicializar o RAG.")

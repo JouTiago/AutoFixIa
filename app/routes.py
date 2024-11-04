@@ -12,24 +12,42 @@ logger = logging.getLogger(__name__)
 
 @main.route('/chat/init', methods=['POST'])
 @verificar_service_token
-@token_required
-def init_chat(user_id):
+def init_chat():
+    logger.info("Requisição recebida em /chat/init")
     connection = get_db_connection()
     if not connection:
         return jsonify({'error': 'Não foi possível conectar ao banco de dados.'}), 500
 
     data = request.get_json()
-    veiculo = data.get('veiculo')  # Dados do veículo, contendo marca, modelo e ano
-    if not veiculo:
-        return jsonify({'error': 'Dados do veículo são necessários.'}), 400
+    veiculo = data.get('veiculo')
+    cpf = request.headers.get('Cpf')
+    logger.info(f"CPF recebido: {cpf}")
+
+    if not veiculo or not cpf:
+        return jsonify({'error': 'Dados do veículo e CPF são necessários.'}), 400
 
     try:
-        # Buscar o manual correspondente no banco de dados
         with connection.cursor() as cursor:
+            params_cliente = {'c_cpf': cpf}
+            cursor.execute("""
+                SELECT * FROM T_CLIENTE WHERE TRIM(c_cpf) = TRIM(:c_cpf)
+            """, params_cliente)
+            result_cliente = cursor.fetchone()
+            if result_cliente:
+                logger.info(f"Cliente encontrado: {result_cliente}")
+            else:
+                logger.info("Cliente não encontrado.")
+
+            # Buscar o id_manual correspondente
+            params = {
+                'marca': veiculo['marca'],
+                'modelo': veiculo['modelo'],
+                'ano': str(veiculo['ano'])
+            }
             cursor.execute("""
                 SELECT id_manual FROM T_MANUAL
                 WHERE marca_manual = :marca AND modelo_manual = :modelo AND ano_manual = :ano
-            """, marca=veiculo['marca'], modelo=veiculo['modelo'], ano=veiculo['ano'])
+            """, params)
             result = cursor.fetchone()
 
             if not result:
@@ -39,81 +57,92 @@ def init_chat(user_id):
             id_chat = str(uuid.uuid4())
 
             # Inserir novo registro em T_CHATBOT
+            params_chatbot = {
+                'id_chat': id_chat,
+                'id_manual': id_manual,
+                'c_cpf': cpf
+            }
             cursor.execute("""
                 INSERT INTO T_CHATBOT (id_chat, resposta_final, resposta_data, id_manual, c_cpf)
-                VALUES (:uid, NULL, NULL, :id_manual, :cpf)
-            """, uid=id_chat, id_manual=id_manual, cpf=user_id)
+                VALUES (:id_chat, NULL, NULL, :id_manual, :c_cpf)
+            """, params_chatbot)
             connection.commit()
 
             # Inicializar o RAG com o manual correspondente
             initialize_rag_with_manual(id_manual)
 
-            # Mensagem inicial
-            initial_message = ("Olá, sou o chatbot da Autofix e vou te ajudar a identificar quaisquer problemas que "
-                               "você possa estar enfrentando com o seu veículo. Qual problema você está enfrentando?")
-            cursor.execute("""
-                INSERT INTO T_MENSAGENS (id_chat, remetente, mensagem)
-                VALUES (:uid, 'assistant', :msg)
-            """, uid=id_chat, msg=initial_message)
-            connection.commit()
-
             logger.info(f"Sessão de chat {id_chat} iniciada para o veículo {veiculo}.")
-            return jsonify({'chat_id': id_chat, 'initial_message': initial_message}), 200
+            return jsonify({'chat_id': id_chat}), 200
 
     except cx_Oracle.Error as e:
         logger.error(f"Erro ao iniciar chat: {e}")
-        return jsonify({'error': 'Erro ao iniciar chat.'}), 500
-    finally:
-        connection.close()
+        return jsonify({'error': f'Erro ao iniciar chat: {str(e)}'}), 500
 
 
 @main.route('/chat/send', methods=['POST'])
 @verificar_service_token
 @token_required
 def send_message(user_id):
+    logger.info("Requisição recebida em /chat/send")
+    token = request.headers.get('Service-Token')
+    logger.info(f"Token recebido: {token}")
     connection = get_db_connection()
     if not connection:
         return jsonify({'error': 'Não foi possível conectar ao banco de dados.'}), 500
+
     try:
         data = request.get_json()
-        chat_id = data.get('chat_id')
+        chat_id = data.get('chatId')
         message = data.get('mensagem')
+        logger.info(f" Chat Id: {chat_id}")
+        logger.info(f" mESSAGE: {message}")
 
         if not chat_id or not message:
             return jsonify({'error': 'chat_id e mensagem são obrigatórios'}), 400
 
         with connection.cursor() as cursor:
-            # Verificar se a sessão de chat pertence ao usuário
+            params = {'id_chat': chat_id}
+            logger.info(f" Params: {params}")
             cursor.execute("""
-                SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :uid
-            """, uid=chat_id)
+                SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :id_chat
+            """, params)
             result = cursor.fetchone()
-            if not result or result[0] != user_id:
+            if not result:
                 return jsonify({'error': 'Sessão de chat não encontrada ou acesso negado.'}), 403
 
-            # Inserir mensagem do usuário na tabela T_MESSAGES
-            cursor.execute("""
-                INSERT INTO T_MESSAGES (id_chat, sender, message)
-                VALUES (:uid, 'user', :msg)
-            """, uid=chat_id, msg=message)
-            connection.commit()
+            cursor.execute("SELECT seq_id_mensagem.NEXTVAL FROM dual")
+            id_mensagem_usuario = cursor.fetchone()[0]
+            logger.info(f"ID msg usuario: {id_mensagem_usuario}")
 
-            # Processar a mensagem com o modelo RAG
+            params_usuario = {
+                'id_mensagem': id_mensagem_usuario,
+                'id_chat': chat_id,
+                'remetente': 'usuario',
+                'mensagem': message
+            }
+            cursor.execute("""
+                INSERT INTO T_MENSAGENS (id_mensagem, id_chat, remetente, mensagem)
+                VALUES (:id_mensagem, :id_chat, :remetente, :mensagem)
+            """, params_usuario)
+            connection.commit()
+            logger.info("inserido no banco")
+
             response = process_query(message)
+            logger.info(f"Response: {response}")
 
-            # Inserir resposta do assistente na tabela T_MESSAGES
-            cursor.execute("""
-                INSERT INTO T_MESSAGES (id_chat, sender, message)
-                VALUES (:uid, 'assistant', :msg)
-            """, uid=chat_id, msg=response)
-            connection.commit()
+            cursor.execute("SELECT seq_id_mensagem.NEXTVAL FROM dual")
+            id_mensagem_bot = cursor.fetchone()[0]
 
-            # Atualizar a tabela T_CHATBOT com a resposta final
+            params_bot = {
+                'id_mensagem': id_mensagem_bot,
+                'id_chat': chat_id,
+                'remetente': 'bot',
+                'mensagem': response
+            }
             cursor.execute("""
-                UPDATE T_CHATBOT
-                SET resposta_final = :resp, resposta_data = CURRENT_TIMESTAMP
-                WHERE id_chat = :uid
-            """, resp=response, uid=chat_id)
+                INSERT INTO T_MENSAGENS (id_mensagem, id_chat, remetente, mensagem)
+                VALUES (:id_mensagem, :id_chat, :remetente, :mensagem)
+            """, params_bot)
             connection.commit()
 
             logger.info(f"Mensagem enviada na sessão {chat_id} pelo usuário {user_id}.")
@@ -129,6 +158,7 @@ def send_message(user_id):
 @verificar_service_token
 @token_required
 def end_chat(user_id):
+    logger.info("Requisição recebida em /chat/end")
     connection = get_db_connection()
     if not connection:
         return jsonify({'error': 'Não foi possível conectar ao banco de dados.'}), 500
@@ -141,23 +171,16 @@ def end_chat(user_id):
 
         with connection.cursor() as cursor:
             # Verificar se a sessão de chat pertence ao usuário
+            params = {'id_chat': chat_id}
             cursor.execute("""
-                SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :uid
-            """, uid=chat_id)
+                SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :id_chat
+            """, params)
             result = cursor.fetchone()
             if not result or result[0] != user_id:
                 return jsonify({'error': 'Sessão de chat não encontrada ou acesso negado.'}), 403
 
-            # Encerrar a sessão de chat (opcional: pode-se marcar como encerrada)
-            cursor.execute("""
-                DELETE FROM T_CHATBOT WHERE id_chat = :uid
-            """, uid=chat_id)
-            connection.commit()
-
-            cursor.execute("""
-                DELETE FROM T_MESSAGES WHERE id_chat = :uid
-            """, uid=chat_id)
-            connection.commit()
+            # Opcional: Marcar a sessão como encerrada ou executar ações de limpeza
+            # Por exemplo, atualizar um campo 'status' em T_CHATBOT
 
             logger.info(f"Sessão de chat {chat_id} encerrada pelo usuário {user_id}.")
             return jsonify({'message': 'Sessão de chat encerrada com sucesso.'}), 200
