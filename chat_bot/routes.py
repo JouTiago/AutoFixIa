@@ -1,9 +1,9 @@
 import cx_Oracle
 from flask import Blueprint, request, jsonify
-from .utils import verificar_service_token, token_required, get_db_connection
+from chat_bot.utils import verificar_service_token, token_required, get_db_connection
 import uuid
 import logging
-from .process import process_query, initialize_rag_with_manual
+from chat_bot.process import initialize_rag_with_manual, generate_query_with_control, chunk_embeddings
 
 main = Blueprint('main', __name__)
 
@@ -38,7 +38,6 @@ def init_chat():
             else:
                 logger.info("Cliente não encontrado.")
 
-            # Buscar o id_manual correspondente
             params = {
                 'marca': veiculo['marca'],
                 'modelo': veiculo['modelo'],
@@ -56,7 +55,6 @@ def init_chat():
             id_manual = result[0]
             id_chat = str(uuid.uuid4())
 
-            # Inserir novo registro em T_CHATBOT
             params_chatbot = {
                 'id_chat': id_chat,
                 'id_manual': id_manual,
@@ -68,7 +66,6 @@ def init_chat():
             """, params_chatbot)
             connection.commit()
 
-            # Inicializar o RAG com o manual correspondente
             initialize_rag_with_manual(id_manual)
 
             logger.info(f"Sessão de chat {id_chat} iniciada para o veículo {veiculo}.")
@@ -104,11 +101,16 @@ def send_message(user_id):
             params = {'id_chat': chat_id}
             logger.info(f" Params: {params}")
             cursor.execute("""
-                SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :id_chat
+                SELECT id_manual FROM T_CHATBOT WHERE id_chat = :id_chat
             """, params)
             result = cursor.fetchone()
             if not result:
                 return jsonify({'error': 'Sessão de chat não encontrada ou acesso negado.'}), 403
+
+            id_manual = result[0]
+
+            if not chunk_embeddings:
+                initialize_rag_with_manual(id_manual)
 
             cursor.execute("SELECT seq_id_mensagem.NEXTVAL FROM dual")
             id_mensagem_usuario = cursor.fetchone()[0]
@@ -127,7 +129,7 @@ def send_message(user_id):
             connection.commit()
             logger.info("inserido no banco")
 
-            response = process_query(message)
+            response = generate_query_with_control(chat_id, message)
             logger.info(f"Response: {response}")
 
             cursor.execute("SELECT seq_id_mensagem.NEXTVAL FROM dual")
@@ -170,7 +172,6 @@ def end_chat(user_id):
             return jsonify({'error': 'chat_id é obrigatório'}), 400
 
         with connection.cursor() as cursor:
-            # Verificar se a sessão de chat pertence ao usuário
             params = {'id_chat': chat_id}
             cursor.execute("""
                 SELECT c_cpf FROM T_CHATBOT WHERE id_chat = :id_chat
@@ -178,9 +179,6 @@ def end_chat(user_id):
             result = cursor.fetchone()
             if not result or result[0] != user_id:
                 return jsonify({'error': 'Sessão de chat não encontrada ou acesso negado.'}), 403
-
-            # Opcional: Marcar a sessão como encerrada ou executar ações de limpeza
-            # Por exemplo, atualizar um campo 'status' em T_CHATBOT
 
             logger.info(f"Sessão de chat {chat_id} encerrada pelo usuário {user_id}.")
             return jsonify({'message': 'Sessão de chat encerrada com sucesso.'}), 200

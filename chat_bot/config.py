@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 import cx_Oracle
 
-# Carregar variáveis de ambiente do .env
 load_dotenv()
 
 

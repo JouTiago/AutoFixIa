@@ -1,15 +1,12 @@
-import jwt
 from functools import wraps
 from flask import request, jsonify, g
 import cx_Oracle
 import logging
 from .config import Config
 
-# Configuração de Logging
 logger = logging.getLogger(__name__)
 
 
-# Inicializar o Pool de Sessões no Início da Aplicação
 def init_oracle_pool():
     try:
         pool = cx_Oracle.SessionPool(
@@ -27,11 +24,9 @@ def init_oracle_pool():
         return None
 
 
-# Criar o pool globalmente
 oracle_pool = init_oracle_pool()
 
 
-# Conexão com o Banco de Dados Oracle usando o Pool
 def get_db_connection():
     global oracle_pool
     if 'db_connection' not in g:
@@ -48,7 +43,6 @@ def get_db_connection():
     return g.db_connection
 
 
-# Decorador para verificar o Service-Token
 def verificar_service_token(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -61,7 +55,6 @@ def verificar_service_token(f):
     return decorated
 
 
-# Decorador para verificar o Token JWT
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
